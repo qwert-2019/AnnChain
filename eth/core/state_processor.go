@@ -17,6 +17,8 @@
 package core
 
 import (
+	"fmt"
+
 	"github.com/dappledger/AnnChain/eth/common"
 	"github.com/dappledger/AnnChain/eth/core/state"
 	"github.com/dappledger/AnnChain/eth/core/types"
@@ -79,6 +81,10 @@ func ApplyTransaction(config *params.ChainConfig, bc ChainContext, author *commo
 	// Edit by zhongan
 	receipt.Logs = statedb.GetLogs(receipt.TxHash)
 	receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
+
+	byt, _ := receipt.MarshalJSON()
+
+	fmt.Println("===ApplyMessage", string(byt), gas, failed, err)
 
 	return receipt, gas, err
 }

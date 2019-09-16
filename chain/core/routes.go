@@ -20,11 +20,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/dappledger/AnnChain/chain/types"
 	"github.com/dappledger/AnnChain/gemmill/go-crypto"
 	rpc "github.com/dappledger/AnnChain/gemmill/rpc/server"
 	gtypes "github.com/dappledger/AnnChain/gemmill/types"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 // RPCNode define the node's abilities provided for rpc calls
@@ -211,26 +211,28 @@ func (h *rpcHandler) UnsafeFlushMempool() (*gtypes.ResultUnsafeFlushMempool, err
 }
 
 func (h *rpcHandler) BroadcastTx(tx []byte) (*gtypes.ResultBroadcastTx, error) {
-	if err := h.node.Application.CheckTx(tx); err != nil {
+	result, err := h.node.Application.CheckTx(tx)
+	if err != nil {
 		return nil, err
 	}
-	if err := h.node.Angine.BroadcastTx(tx); err != nil {
+	if err := h.node.Angine.BroadcastTx(result); err != nil {
 		return nil, err
 	}
 
-	hash := gtypes.Tx(tx).Hash()
+	hash := gtypes.Tx(result).Hash()
 	return &gtypes.ResultBroadcastTx{TxHash: hexutil.Encode(hash), Code: 0}, nil
 }
 
 func (h *rpcHandler) BroadcastTxCommit(tx []byte) (*gtypes.ResultBroadcastTxCommit, error) {
-	if err := h.node.Application.CheckTx(tx); err != nil {
+	result, err := h.node.Application.CheckTx(tx)
+	if err != nil {
 		return nil, err
 	}
-	if err := h.node.Angine.BroadcastTxCommit(tx); err != nil {
+	if err := h.node.Angine.BroadcastTxCommit(result); err != nil {
 		return nil, err
 	}
 
-	hash := gtypes.Tx(tx).Hash()
+	hash := gtypes.Tx(result).Hash()
 	return &gtypes.ResultBroadcastTxCommit{TxHash: hexutil.Encode(hash), Code: 0}, nil
 }
 

@@ -41,6 +41,8 @@ import (
 	"github.com/dappledger/AnnChain/gemmill/modules/go-log"
 	"github.com/dappledger/AnnChain/gemmill/modules/go-merkle"
 	gtypes "github.com/dappledger/AnnChain/gemmill/types"
+	"github.com/dappledger/AnnChain/utils/commu"
+	"github.com/dappledger/AnnChain/utils/private"
 )
 
 const (
@@ -97,29 +99,41 @@ type EVMApp struct {
 	datadir string
 	Config  *viper.Viper
 
+	secChanHost string
+
 	currentHeader *etypes.Header
 	chainConfig   *params.ChainConfig
 
-	stateDb      ethdb.Database
-	stateMtx     sync.Mutex
-	state        *estate.StateDB
-	currentState *estate.StateDB
+	stateDb  ethdb.Database
+	stateMtx sync.Mutex
 
-	receipts etypes.Receipts
-	Signer   etypes.Signer
+	publicState        *estate.StateDB
+	currentPublicState *estate.StateDB
+
+	privateState        *estate.StateDB
+	currentPrivateState *estate.StateDB
+
+	publicReceipts  etypes.Receipts
+	privateReceipts etypes.Receipts
+
+	publicSigner  etypes.Signer
+	privateSigner etypes.Signer
 }
 
 type LastBlockInfo struct {
-	Height  int64
-	AppHash []byte
+	Height   int64
+	AppHash  []byte
+	PrivHash []byte
 }
 
 func NewEVMApp(config *viper.Viper) (*EVMApp, error) {
 	app := &EVMApp{
-		datadir:     config.GetString("db_dir"),
-		Config:      config,
-		chainConfig: params.MainnetChainConfig,
-		Signer:      new(etypes.HomesteadSigner),
+		datadir:       config.GetString("db_dir"),
+		secChanHost:   config.GetString("private_server_host"),
+		Config:        config,
+		chainConfig:   params.MainnetChainConfig,
+		publicSigner:  new(etypes.HomesteadSigner),
+		privateSigner: new(etypes.AnnsteadSigner),
 	}
 
 	app.AngineHooks = gtypes.Hooks{
@@ -150,13 +164,14 @@ func OpenDatabase(datadir string, name string, cache int, handles int) (ethdb.Da
 }
 
 func (app *EVMApp) writeGenesis() error {
-	if app.getLastAppHash() != EmptyTrieRoot {
+	pubHash, privHash := app.getLastAppHash()
+	if pubHash != EmptyTrieRoot && privHash != EmptyTrieRoot {
 		return nil
 	}
 
 	g := core.DefaultGenesis()
 	b := g.ToBlock(app.stateDb)
-	app.SaveLastBlock(LastBlockInfo{Height: 0, AppHash: b.Root().Bytes()})
+	app.SaveLastBlock(LastBlockInfo{Height: 0, AppHash: b.Root().Bytes(), PrivHash: b.Root().Bytes()})
 	return nil
 }
 
@@ -168,8 +183,9 @@ func (app *EVMApp) Start() (err error) {
 	}
 
 	lastBlock := &LastBlockInfo{
-		Height:  0,
-		AppHash: make([]byte, 0),
+		Height:   0,
+		AppHash:  make([]byte, 0),
+		PrivHash: make([]byte, 0),
 	}
 	if res, err := app.LoadLastBlock(lastBlock); err == nil && res != nil {
 		lastBlock = res.(*LastBlockInfo)
@@ -179,33 +195,50 @@ func (app *EVMApp) Start() (err error) {
 		return
 	}
 
-	// Load evm state when starting
-	trieRoot := EmptyTrieRoot
+	// Load evm publicState when starting
+	pubTrieRoot := EmptyTrieRoot
 	if len(lastBlock.AppHash) > 0 {
-		trieRoot = common.BytesToHash(lastBlock.AppHash)
+		pubTrieRoot = common.BytesToHash(lastBlock.AppHash)
+	}
+	privTrieRoot := EmptyTrieRoot
+	if len(lastBlock.PrivHash) > 0 {
+		privTrieRoot = common.BytesToHash(lastBlock.PrivHash)
 	}
 	app.pool.Start(lastBlock.Height)
-	if app.state, err = estate.New(trieRoot, estate.NewDatabase(app.stateDb)); err != nil {
+	if app.publicState, err = estate.New(pubTrieRoot, estate.NewDatabase(app.stateDb)); err != nil {
 		app.Stop()
-		log.Error("fail to new state", zap.Error(err))
+		log.Error("fail to new publicState", zap.Error(err))
 		return
 	}
-
+	if app.privateState, err = estate.New(privTrieRoot, estate.NewDatabase(app.stateDb)); err != nil {
+		app.Stop()
+		log.Error("fail to new privateState", zap.Error(err))
+		return
+	}
+	commu.DefaultHost = app.secChanHost
 	return nil
 }
 
-func (app *EVMApp) getLastAppHash() common.Hash {
+func (app *EVMApp) getLastAppHash() (pubHash, privHash common.Hash) {
 	lastBlock := &LastBlockInfo{
-		Height:  0,
-		AppHash: make([]byte, 0),
+		Height:   0,
+		AppHash:  make([]byte, 0),
+		PrivHash: make([]byte, 0),
 	}
 	if res, err := app.LoadLastBlock(lastBlock); err == nil && res != nil {
 		lastBlock = res.(*LastBlockInfo)
 	}
 	if len(lastBlock.AppHash) > 0 {
-		return common.BytesToHash(lastBlock.AppHash)
+		pubHash = common.BytesToHash(lastBlock.AppHash)
+	} else {
+		pubHash = EmptyTrieRoot
 	}
-	return EmptyTrieRoot
+	if len(lastBlock.PrivHash) > 0 {
+		privHash = common.BytesToHash(lastBlock.PrivHash)
+	} else {
+		privHash = EmptyTrieRoot
+	}
+	return
 }
 
 func (app *EVMApp) GetTxPool() gtypes.TxPool {
@@ -233,24 +266,58 @@ func (app *EVMApp) OnPrevote(height, round int64, block *gtypes.Block) (interfac
 	return nil, nil
 }
 
+func (app *EVMApp) makePublicPayloadHashReceipt(tx *etypes.Transaction) *etypes.Receipt {
+
+	return &etypes.Receipt{
+		TxHash:  tx.Hash(),
+		GasUsed: 0,
+		Status:  1,
+	}
+}
+
 func (app *EVMApp) genExecFun(block *gtypes.Block, res *gtypes.ExecuteResult) BeginExecFunc {
 	blockHash := common.BytesToHash(block.Hash())
 	app.currentHeader = makeCurrentHeader(block, block.Header)
 
 	return func() (ExecFunc, EndExecFunc) {
-		state := app.currentState
-		stateSnapshot := state.Snapshot()
-		temReceipt := make([]*etypes.Receipt, 0)
+		publicState := app.currentPublicState
+		publicSnapshot := publicState.Snapshot()
+
+		privateState := app.currentPrivateState
+		privateSnapshot := privateState.Snapshot()
+
+		temPublicReceipt := make([]*etypes.Receipt, 0)
+		temPrivateReceipt := make([]*etypes.Receipt, 0)
 
 		execFunc := func(txIndex int, raw []byte, tx *etypes.Transaction) error {
 			gp := new(core.GasPool).AddGas(math.MaxBig256.Uint64())
-
 			txBytes, err := rlp.EncodeToBytes(tx)
 			if err != nil {
 				return err
 			}
 			txhash := gtypes.Tx(txBytes).Hash()
-			state.Prepare(common.BytesToHash(txhash), blockHash, txIndex)
+			var runEvmState *estate.StateDB
+			from, _ := app.publicSigner.Sender(tx)
+			if tx.Protected() {
+				if len(app.secChanHost) > 0 {
+					runEvmState = privateState
+					publicState.SetNonce(from, publicState.GetNonce(from)+1)
+					fmt.Println("===privatestate begin evm tx", from.Hex())
+				} else {
+					publicState.Prepare(common.BytesToHash(txhash), blockHash, txIndex)
+					publicState.SetNonce(from, publicState.GetNonce(from)+1)
+					privateState.SetNonce(from, privateState.GetNonce(from)+1)
+					temPublicReceipt = append(temPublicReceipt, app.makePublicPayloadHashReceipt(tx))
+					return nil
+				}
+
+			} else {
+				runEvmState = publicState
+				privateState.SetNonce(from, privateState.GetNonce(from)+1)
+				fmt.Println("===publicstate begin evm tx")
+			}
+
+			runEvmState.Prepare(common.BytesToHash(txhash), blockHash, txIndex)
 
 			bc := NewBlockChain(app.stateDb)
 			receipt, _, err := core.ApplyTransaction(
@@ -258,7 +325,7 @@ func (app *EVMApp) genExecFun(block *gtypes.Block, res *gtypes.ExecuteResult) Be
 				bc,
 				nil, // coinbase ,maybe use local account
 				gp,
-				state,
+				runEvmState,
 				app.currentHeader,
 				tx,
 				new(uint64),
@@ -267,19 +334,26 @@ func (app *EVMApp) genExecFun(block *gtypes.Block, res *gtypes.ExecuteResult) Be
 			if err != nil {
 				return err
 			}
-			temReceipt = append(temReceipt, receipt)
+			if tx.Protected() {
+				temPrivateReceipt = append(temPrivateReceipt, receipt)
+			} else {
+				temPublicReceipt = append(temPublicReceipt, receipt)
+			}
 			return nil
 		}
 
 		endFunc := func(raw []byte, err error) bool {
 			if err != nil {
 				log.Warn("[evm execute],apply transaction", zap.Error(err))
-				state.RevertToSnapshot(stateSnapshot)
-				temReceipt = nil
+				publicState.RevertToSnapshot(publicSnapshot)
+				privateState.RevertToSnapshot(privateSnapshot)
+				temPrivateReceipt = nil
+				temPublicReceipt = nil
 				res.InvalidTxs = append(res.InvalidTxs, gtypes.ExecuteInvalidTx{Bytes: raw, Error: err})
 				return true
 			}
-			app.receipts = append(app.receipts, temReceipt...)
+			app.privateReceipts = append(app.privateReceipts, temPrivateReceipt...)
+			app.publicReceipts = append(app.publicReceipts, temPublicReceipt...)
 			res.ValidTxs = append(res.ValidTxs, raw)
 			return true
 		}
@@ -302,11 +376,15 @@ func (app *EVMApp) OnExecute(height, round int64, block *gtypes.Block) (interfac
 		res gtypes.ExecuteResult
 		err error
 	)
-
-	if app.currentState, err = estate.New(app.getLastAppHash(), estate.NewDatabase(app.stateDb)); err != nil {
+	fmt.Println("onExecute tx:", height)
+	pubHash, privHash := app.getLastAppHash()
+	if app.currentPublicState, err = estate.New(pubHash, estate.NewDatabase(app.stateDb)); err != nil {
 		return nil, errors.Wrap(err, "create StateDB failed")
 	}
-	exeWithCPUParallelVeirfy(app.Signer, block.Data.Txs, nil, app.genExecFun(block, &res))
+	if app.currentPrivateState, err = estate.New(privHash, estate.NewDatabase(app.stateDb)); err != nil {
+		return nil, errors.Wrap(err, "create StateDB failed")
+	}
+	exeWithCPUParallelVeirfy(app.publicSigner, app.privateSigner, block.Data.Txs, nil, app.genExecFun(block, &res))
 
 	m := make(map[string]int)
 	for _, tx := range block.Data.Txs {
@@ -323,30 +401,42 @@ func (app *EVMApp) OnExecute(height, round int64, block *gtypes.Block) (interfac
 
 // OnCommit run in a sync way, we don't need to lock stateDupMtx, but stateMtx is still needed
 func (app *EVMApp) OnCommit(height, round int64, block *gtypes.Block) (interface{}, error) {
-	appHash, err := app.currentState.Commit(true)
+	appHash, err := app.currentPublicState.Commit(true)
+	if err != nil {
+		return nil, err
+	}
+	privHash, err := app.currentPrivateState.Commit(true)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := app.currentState.Database().TrieDB().Commit(appHash, false); err != nil {
+	if err := app.currentPublicState.Database().TrieDB().Commit(appHash, false); err != nil {
+		return nil, err
+	}
+	if err := app.currentPrivateState.Database().TrieDB().Commit(privHash, false); err != nil {
 		return nil, err
 	}
 
 	app.stateMtx.Lock()
-	if app.state, err = estate.New(appHash, estate.NewDatabase(app.stateDb)); err != nil {
+	if app.publicState, err = estate.New(appHash, estate.NewDatabase(app.stateDb)); err != nil {
 		app.stateMtx.Unlock()
-		return nil, errors.Wrap(err, "create StateDB failed")
+		return nil, errors.Wrap(err, "create public StateDB failed")
+	}
+	if app.privateState, err = estate.New(privHash, estate.NewDatabase(app.stateDb)); err != nil {
+		app.stateMtx.Unlock()
+		return nil, errors.Wrap(err, "create private StateDB failed")
 	}
 	app.stateMtx.Unlock()
 
-	app.SaveLastBlock(LastBlockInfo{Height: height, AppHash: appHash.Bytes()})
+	app.SaveLastBlock(LastBlockInfo{Height: height, AppHash: appHash.Bytes(), PrivHash: privHash.Bytes()})
 
 	rHash, err := app.SaveReceipts()
 	if err != nil {
 		log.Error("application save receipts", zap.Error(err), zap.Int64("height", block.Height))
 	}
 
-	app.receipts = nil
+	app.publicReceipts = nil
+	app.privateReceipts = nil
 	app.pool.updateToState()
 	log.Info("application save to db", zap.String("appHash", fmt.Sprintf("%X", appHash.Bytes())), zap.String("receiptHash", fmt.Sprintf("%X", rHash)))
 
@@ -356,48 +446,86 @@ func (app *EVMApp) OnCommit(height, round int64, block *gtypes.Block) (interface
 	}, nil
 }
 
-func (app *EVMApp) CheckTx(bs []byte) error {
+func (app *EVMApp) CheckTx(bs []byte) ([]byte, error) {
 	tx := &etypes.Transaction{}
 	err := rlp.DecodeBytes(bs, tx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	from, _ := etypes.Sender(app.Signer, tx)
+	var (
+		judgeState *estate.StateDB
+		from       common.Address
+	)
+	if tx.Protected() {
+		from, _ = etypes.Sender(app.privateSigner, tx)
+		judgeState = app.privateState
+		repPayload := new(private.ReplacePayload)
+		if err := repPayload.Decode(tx.Data()); err != nil {
+			return nil, err
+		}
+		if len(app.secChanHost) > 0 {
+			payloadHash, err := commu.SendPayload("", repPayload.PrivateMembers, repPayload.Payload)
+			if err != nil {
+				return nil, err
+			}
+			tx.SetData(payloadHash)
+			fmt.Println("SendPayload Success:", common.Bytes2Hex(payloadHash), repPayload.Payload)
+		} else {
+			return nil, errors.New("node private tx unsupported")
+		}
 
+	} else {
+		from, _ = etypes.Sender(app.publicSigner, tx)
+		judgeState = app.publicState
+	}
 	app.stateMtx.Lock()
 	defer app.stateMtx.Unlock()
 	// Last but not least check for nonce errors
 	nonce := tx.Nonce()
-	getNonce := app.state.GetNonce(from)
+	getNonce := judgeState.GetNonce(from)
 	if getNonce > nonce {
 		txhash := gtypes.Tx(bs).Hash()
-		return fmt.Errorf("nonce(%d) different with getNonce(%d), transaction already exists %v", nonce, getNonce, hex.EncodeToString(txhash))
+		return nil, fmt.Errorf("nonce(%d) different with getNonce(%d), transaction already exists %v", nonce, getNonce, hex.EncodeToString(txhash))
 	}
 	// Transactor should have enough funds to cover the costs
 	// cost == V + GP * GL
-	if app.state.GetBalance(from).Cmp(tx.Cost()) < 0 {
-		return fmt.Errorf("not enough funds")
+	if judgeState.GetBalance(from).Cmp(tx.Cost()) < 0 {
+		return nil, fmt.Errorf("not enough funds")
 	}
-	return nil
+	return rlp.EncodeToBytes(tx)
 }
 
 func (app *EVMApp) SaveReceipts() ([]byte, error) {
-	savedReceipts := make([][]byte, 0, len(app.receipts))
+	savedReceipts := make([][]byte, 0, len(app.publicReceipts))
 	receiptBatch := app.stateDb.NewBatch()
 
-	for _, receipt := range app.receipts {
-		storageReceipt := (*etypes.ReceiptForStorage)(receipt)
+	for _, publicReceipt := range app.publicReceipts {
+		storageReceipt := (*etypes.ReceiptForStorage)(publicReceipt)
 		storageReceiptBytes, err := rlp.EncodeToBytes(storageReceipt)
 		if err != nil {
 			return nil, fmt.Errorf("wrong rlp encode:%v", err.Error())
 		}
 
-		key := append(ReceiptsPrefix, receipt.TxHash.Bytes()...)
+		key := append(ReceiptsPrefix, publicReceipt.TxHash.Bytes()...)
 		if err := receiptBatch.Put(key, storageReceiptBytes); err != nil {
-			return nil, fmt.Errorf("batch receipt failed:%v", err.Error())
+			return nil, fmt.Errorf("batch publicReceipt failed:%v", err.Error())
 		}
 		savedReceipts = append(savedReceipts, storageReceiptBytes)
 	}
+
+	for _, privReceipt := range app.privateReceipts {
+		storageReceipt := (*etypes.ReceiptForStorage)(privReceipt)
+		storageReceiptBytes, err := rlp.EncodeToBytes(storageReceipt)
+		if err != nil {
+			return nil, fmt.Errorf("wrong rlp encode:%v", err.Error())
+		}
+
+		key := append(ReceiptsPrefix, privReceipt.TxHash.Bytes()...)
+		if err := receiptBatch.Put(key, storageReceiptBytes); err != nil {
+			return nil, fmt.Errorf("batch storageReceipt failed:%v", err.Error())
+		}
+	}
+
 	if err := receiptBatch.Write(); err != nil {
 		return nil, fmt.Errorf("persist receipts failed:%v", err.Error())
 	}
@@ -458,15 +586,26 @@ func (app *EVMApp) queryContractExistence(load []byte) gtypes.Result {
 		return gtypes.NewError(gtypes.CodeType_BaseInvalidInput, err.Error())
 	}
 	contractAddr := tx.To()
-
+	var hashBytes []byte
 	app.stateMtx.Lock()
-	hashBytes := app.state.GetCodeHash(*contractAddr).Bytes()
+	if tx.Protected() {
+		hashBytes = app.privateState.GetCodeHash(*contractAddr).Bytes()
+	} else {
+		hashBytes = app.publicState.GetCodeHash(*contractAddr).Bytes()
+	}
 	app.stateMtx.Unlock()
 
 	if bytes.Equal(tx.Data(), hashBytes) {
 		return gtypes.NewResultOK(append([]byte{}, byte(0x01)), "contract exists")
 	}
 	return gtypes.NewResultOK(append([]byte{}, byte(0x00)), "constract doesn't exist")
+}
+
+func (app *EVMApp) Sender(tx *etypes.Transaction) (common.Address, error) {
+	if tx.Protected() {
+		return app.privateSigner.Sender(tx)
+	}
+	return app.publicSigner.Sender(tx)
 }
 
 func (app *EVMApp) queryContract(load []byte, height uint64) gtypes.Result {
@@ -476,7 +615,7 @@ func (app *EVMApp) queryContract(load []byte, height uint64) gtypes.Result {
 		return gtypes.NewError(gtypes.CodeType_BaseInvalidInput, err.Error())
 	}
 
-	from, err := app.Signer.Sender(tx)
+	from, err := app.Sender(tx)
 	if err != nil {
 		return gtypes.NewError(gtypes.CodeType_BaseInvalidInput, err.Error())
 	}
@@ -484,14 +623,23 @@ func (app *EVMApp) queryContract(load []byte, height uint64) gtypes.Result {
 
 	bc := NewBlockChain(app.stateDb)
 
-	var vmEnv *vm.EVM
+	var (
+		vmEnv *vm.EVM
+	)
 
 	if height == 0 {
 
 		envCxt := core.NewEVMContext(txMsg, app.currentHeader, bc, nil)
 
+		fmt.Println("====isPrivateTx", tx.Protected())
+
 		app.stateMtx.Lock()
-		vmEnv = vm.NewEVM(envCxt, app.state.Copy(), app.chainConfig, evmConfig)
+		if tx.Protected() {
+			vmEnv = vm.NewEVM(envCxt, app.currentPrivateState.Copy(), app.chainConfig, evmConfig)
+		} else {
+			vmEnv = vm.NewEVM(envCxt, app.currentPublicState.Copy(), app.chainConfig, evmConfig)
+		}
+
 		app.stateMtx.Unlock()
 	} else {
 		//appHash save in next block AppHash
@@ -508,11 +656,11 @@ func (app *EVMApp) queryContract(load []byte, height uint64) gtypes.Result {
 			trieRoot = common.BytesToHash(blockMeta.Header.AppHash)
 		}
 
-		state, err := estate.New(trieRoot, estate.NewDatabase(app.stateDb))
+		evmState, err := estate.New(trieRoot, estate.NewDatabase(app.stateDb))
 		if err != nil {
 			return gtypes.NewError(gtypes.CodeType_BaseInvalidInput, err.Error())
 		}
-		vmEnv = vm.NewEVM(envCxt, state, app.chainConfig, evmConfig)
+		vmEnv = vm.NewEVM(envCxt, evmState, app.chainConfig, evmConfig)
 	}
 
 	gpl := new(core.GasPool).AddGas(math.MaxBig256.Uint64())
@@ -520,7 +668,7 @@ func (app *EVMApp) queryContract(load []byte, height uint64) gtypes.Result {
 	if err != nil {
 		log.Warn("query apply msg err", zap.Error(err))
 	}
-
+	fmt.Println("====res", res)
 	return gtypes.NewResultOK(res, "")
 }
 
@@ -541,7 +689,7 @@ func (app *EVMApp) queryNonce(addrBytes []byte) gtypes.Result {
 	addr := common.BytesToAddress(addrBytes)
 
 	app.stateMtx.Lock()
-	nonce := app.state.GetNonce(addr)
+	nonce := app.publicState.GetNonce(addr)
 	app.stateMtx.Unlock()
 
 	data, err := rlp.EncodeToBytes(nonce)

@@ -53,7 +53,7 @@ type BeginExecFunc func() (ExecFunc, EndExecFunc)
 type ExecFunc func(index int, raw []byte, tx *etypes.Transaction) error
 type EndExecFunc func(bs []byte, err error) bool
 
-func exeWithCPUParallelVeirfy(signer etypes.Signer, txs gtypes.Txs,
+func exeWithCPUParallelVeirfy(pubSigner, privSigner etypes.Signer, txs gtypes.Txs,
 	quit chan struct{}, beginExec BeginExecFunc) error {
 	var exit int32
 	go func() {
@@ -75,7 +75,7 @@ func exeWithCPUParallelVeirfy(signer etypes.Signer, txs gtypes.Txs,
 		validateRoutineCount = 8
 	}
 	for i := 0; i < validateRoutineCount; i++ {
-		go validateRoutine(signer, appTxQ, &exit)
+		go validateRoutine(pubSigner, privSigner, appTxQ, &exit)
 	}
 
 	size := len(txs)
@@ -169,7 +169,7 @@ func txQueue(tptx gtypes.Tx, apptxQ [][]appTx, i, j int) error {
 	return nil
 }
 
-func validateRoutine(signer etypes.Signer, appTxQ [][]appTx, exit *int32) {
+func validateRoutine(pubSigner, privSigner etypes.Signer, appTxQ [][]appTx, exit *int32) {
 	size := len(appTxQ)
 	for i := 0; i < size; i++ {
 		lsize := len(appTxQ[i])
@@ -188,7 +188,7 @@ func validateRoutine(signer etypes.Signer, appTxQ [][]appTx, exit *int32) {
 				case appTxStatusNone: // we can do nothing but waiting
 					time.Sleep(time.Microsecond)
 				case appTxStatusInit: // try validating
-					if err := tryValidate(signer, pcur); err != nil {
+					if err := tryValidate(pubSigner, privSigner, pcur); err != nil {
 						break OUTERFOR
 					}
 				default: // move to next
@@ -199,7 +199,7 @@ func validateRoutine(signer etypes.Signer, appTxQ [][]appTx, exit *int32) {
 	}
 }
 
-func tryValidate(signer etypes.Signer, tx *appTx) error {
+func tryValidate(pubSigner, privSigner etypes.Signer, tx *appTx) error {
 	swapped := atomic.CompareAndSwapInt32(&tx.status, appTxStatusInit, appTxStatusChecking)
 	if !swapped {
 		return nil
@@ -218,8 +218,12 @@ func tryValidate(signer etypes.Signer, tx *appTx) error {
 		atomic.StoreInt32(&tx.status, appTxStatusChecked)
 		return nil
 	}
-
-	_, err := etypes.Sender(signer, tx.tx)
+	var err error
+	if tx.tx.Protected() {
+		_, err = etypes.Sender(privSigner, tx.tx)
+	} else {
+		_, err = etypes.Sender(pubSigner, tx.tx)
+	}
 	if err != nil {
 		atomic.StoreInt32(&tx.status, appTxStatusFailed)
 		tx.err = err

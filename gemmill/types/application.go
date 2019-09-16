@@ -17,6 +17,7 @@ package types
 import (
 	"bytes"
 	"errors"
+
 	"github.com/dappledger/AnnChain/gemmill/go-wire"
 	gcmn "github.com/dappledger/AnnChain/gemmill/modules/go-common"
 	"github.com/dappledger/AnnChain/gemmill/modules/go-db"
@@ -32,7 +33,7 @@ type TxPoolApplication interface {
 type Application interface {
 	GetAngineHooks() Hooks
 	CompatibleWithAngine()
-	CheckTx([]byte) error
+	CheckTx([]byte) ([]byte, error)
 	Query([]byte) Result
 	Info() ResultInfo
 	Start() error

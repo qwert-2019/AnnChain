@@ -257,6 +257,7 @@ func DefaultConfig() (conf *viper.Viper) {
 	conf.SetDefault("tracerouter_msg_ttl", 5)
 	conf.Set("threshold_blocks", 0)
 	conf.SetDefault("block_size", 5000)
+	conf.Set("private_server_host", "")
 
 	return conf
 }

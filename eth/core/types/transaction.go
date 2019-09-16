@@ -19,6 +19,7 @@ package types
 import (
 	"container/heap"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"sync/atomic"
@@ -27,6 +28,7 @@ import (
 	"github.com/dappledger/AnnChain/eth/common/hexutil"
 	"github.com/dappledger/AnnChain/eth/crypto"
 	"github.com/dappledger/AnnChain/eth/rlp"
+	"github.com/dappledger/AnnChain/utils/commu"
 )
 
 //go:generate gencodec -type txdata -field-override txdataMarshaling -out gen_tx_json.go
@@ -171,6 +173,13 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 	*tx = Transaction{data: dec}
 	return nil
 }
+func (tx *Transaction) SetData(payload []byte) {
+	if payload != nil {
+		tx.data.Payload = make([]byte, len(payload))
+		copy(tx.data.Payload, payload)
+	}
+	return
+}
 
 func (tx *Transaction) Data() []byte       { return common.CopyBytes(tx.data.Payload) }
 func (tx *Transaction) Gas() uint64        { return tx.data.GasLimit }
@@ -218,18 +227,24 @@ func (tx *Transaction) Size() common.StorageSize {
 //
 // XXX Rename message to something less arbitrary?
 func (tx *Transaction) AsMessage(s Signer) (Message, error) {
+	var err error
 	msg := Message{
 		nonce:      tx.data.AccountNonce,
 		gasLimit:   tx.data.GasLimit,
 		gasPrice:   new(big.Int).Set(tx.data.Price),
 		to:         tx.data.Recipient,
 		amount:     tx.data.Amount,
-		data:       tx.data.Payload,
 		checkNonce: true,
 	}
-
-	var err error
 	msg.from, err = Sender(s, tx)
+	if tx.Protected() {
+		payload, err := commu.GetPayload("", common.Bytes2Hex(tx.Data()))
+		if err != nil {
+			return msg, err
+		}
+		msg.data = payload
+		fmt.Println("GetPayload Success:", common.Bytes2Hex(tx.Data()), payload)
+	}
 	return msg, err
 }
 

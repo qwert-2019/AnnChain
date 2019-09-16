@@ -234,7 +234,7 @@ func (tp *ethTxPool) refreshAdminOP(txsMap map[string]struct{}) {
 // get account nonce from app.state
 func (tp *ethTxPool) safeGetNonce(addr common.Address) uint64 {
 	tp.app.stateMtx.Lock()
-	nonce := tp.app.state.GetNonce(addr)
+	nonce := tp.app.publicState.GetNonce(addr)
 	tp.app.stateMtx.Unlock()
 	return nonce
 }
@@ -246,7 +246,7 @@ func (tp *ethTxPool) CheckAndAdd(tx *etypes.Transaction, rawTx types.Tx) error {
 		return errTxExist
 	}
 
-	from, _ := etypes.Sender(tp.app.Signer, tx)
+	from, _ := tp.app.Sender(tx)
 	currentNonce := tp.safeGetNonce(from)
 	if currentNonce > tx.Nonce() {
 		return fmt.Errorf("nonce(%d) different with getNonce(%d)", tx.Nonce(), currentNonce)
