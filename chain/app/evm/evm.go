@@ -376,7 +376,6 @@ func (app *EVMApp) OnExecute(height, round int64, block *gtypes.Block) (interfac
 		res gtypes.ExecuteResult
 		err error
 	)
-	fmt.Println("onExecute tx:", height)
 	pubHash, privHash := app.getLastAppHash()
 	if app.currentPublicState, err = estate.New(pubHash, estate.NewDatabase(app.stateDb)); err != nil {
 		return nil, errors.Wrap(err, "create StateDB failed")
@@ -446,50 +445,49 @@ func (app *EVMApp) OnCommit(height, round int64, block *gtypes.Block) (interface
 	}, nil
 }
 
+func (app *EVMApp) isPrivateNode() bool {
+	if len(app.secChanHost) > 0 {
+		return true
+	}
+	return false
+}
+
 func (app *EVMApp) CheckTx(bs []byte) ([]byte, error) {
 	tx := &etypes.Transaction{}
 	err := rlp.DecodeBytes(bs, tx)
 	if err != nil {
 		return nil, err
 	}
-	var (
-		judgeState *estate.StateDB
-		from       common.Address
-	)
+	from, err := app.Sender(tx)
+	if err != nil {
+		return nil, err
+	}
 	if tx.Protected() {
-		from, _ = etypes.Sender(app.privateSigner, tx)
-		judgeState = app.privateState
 		repPayload := new(private.ReplacePayload)
 		if err := repPayload.Decode(tx.Data()); err != nil {
 			return nil, err
 		}
-		if len(app.secChanHost) > 0 {
+		if app.isPrivateNode() {
 			payloadHash, err := commu.SendPayload("", repPayload.PrivateMembers, repPayload.Payload)
 			if err != nil {
 				return nil, err
 			}
 			tx.SetData(payloadHash)
-			fmt.Println("SendPayload Success:", common.Bytes2Hex(payloadHash), repPayload.Payload)
 		} else {
 			return nil, errors.New("node private tx unsupported")
 		}
-
-	} else {
-		from, _ = etypes.Sender(app.publicSigner, tx)
-		judgeState = app.publicState
 	}
 	app.stateMtx.Lock()
 	defer app.stateMtx.Unlock()
 	// Last but not least check for nonce errors
-	nonce := tx.Nonce()
-	getNonce := judgeState.GetNonce(from)
-	if getNonce > nonce {
+	getNonce := app.publicState.GetNonce(from)
+	if getNonce > tx.Nonce() {
 		txhash := gtypes.Tx(bs).Hash()
-		return nil, fmt.Errorf("nonce(%d) different with getNonce(%d), transaction already exists %v", nonce, getNonce, hex.EncodeToString(txhash))
+		return nil, fmt.Errorf("nonce(%d) different with getNonce(%d), transaction already exists %v", tx.Nonce(), getNonce, hex.EncodeToString(txhash))
 	}
 	// Transactor should have enough funds to cover the costs
 	// cost == V + GP * GL
-	if judgeState.GetBalance(from).Cmp(tx.Cost()) < 0 {
+	if app.publicState.GetBalance(from).Cmp(tx.Cost()) < 0 {
 		return nil, fmt.Errorf("not enough funds")
 	}
 	return rlp.EncodeToBytes(tx)

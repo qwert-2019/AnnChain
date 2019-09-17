@@ -246,7 +246,7 @@ func (tp *ethTxPool) CheckAndAdd(tx *etypes.Transaction, rawTx types.Tx) error {
 		return errTxExist
 	}
 
-	from, _ := tp.app.Sender(tx)
+	from, _ := tp.app.publicSigner.Sender(tx)
 	currentNonce := tp.safeGetNonce(from)
 	if currentNonce > tx.Nonce() {
 		return fmt.Errorf("nonce(%d) different with getNonce(%d)", tx.Nonce(), currentNonce)
