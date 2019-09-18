@@ -19,7 +19,6 @@ package types
 import (
 	"container/heap"
 	"errors"
-	"fmt"
 	"io"
 	"math/big"
 	"sync/atomic"
@@ -236,18 +235,15 @@ func (tx *Transaction) AsMessage(s Signer) (Message, error) {
 		amount:     tx.data.Amount,
 		checkNonce: true,
 	}
-	if msg.to != nil {
-		fmt.Println("asmessage:", msg.to.Hex())
-	}
-
 	msg.from, err = Sender(s, tx)
 	if tx.Protected() {
 		payload, err := commu.GetPayload("", common.Bytes2Hex(tx.Data()))
 		if err != nil {
 			return msg, err
 		}
-		msg.data = payload
-		fmt.Println("GetPayload Success:", common.Bytes2Hex(tx.Data()), payload)
+		msg.data = common.CopyBytes(payload)
+	} else {
+		msg.data = tx.Data()
 	}
 	return msg, err
 }

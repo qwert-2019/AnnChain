@@ -268,11 +268,17 @@ func (app *EVMApp) OnPrevote(height, round int64, block *gtypes.Block) (interfac
 
 func (app *EVMApp) makePublicPayloadHashReceipt(tx *etypes.Transaction) *etypes.Receipt {
 
-	return &etypes.Receipt{
+	receipt := &etypes.Receipt{
 		TxHash:  tx.Hash(),
 		GasUsed: 0,
 		Status:  1,
 	}
+	if tx.To() != nil {
+		receipt.ContractAddress = *tx.To()
+	} else {
+		receipt.ContractAddress = common.Address{}
+	}
+	return receipt
 }
 
 func (app *EVMApp) genExecFun(block *gtypes.Block, res *gtypes.ExecuteResult) BeginExecFunc {
@@ -297,24 +303,15 @@ func (app *EVMApp) genExecFun(block *gtypes.Block, res *gtypes.ExecuteResult) Be
 			}
 			txhash := gtypes.Tx(txBytes).Hash()
 			var runEvmState *estate.StateDB
-			from, _ := app.publicSigner.Sender(tx)
 			if tx.Protected() {
-				if len(app.secChanHost) > 0 {
+				temPublicReceipt = append(temPublicReceipt, app.makePublicPayloadHashReceipt(tx))
+				if app.isPrivateNode() {
 					runEvmState = privateState
-					publicState.SetNonce(from, publicState.GetNonce(from)+1)
-					fmt.Println("===privatestate begin evm tx", from.Hex())
 				} else {
-					publicState.Prepare(common.BytesToHash(txhash), blockHash, txIndex)
-					publicState.SetNonce(from, publicState.GetNonce(from)+1)
-					privateState.SetNonce(from, privateState.GetNonce(from)+1)
-					temPublicReceipt = append(temPublicReceipt, app.makePublicPayloadHashReceipt(tx))
 					return nil
 				}
-
 			} else {
 				runEvmState = publicState
-				privateState.SetNonce(from, privateState.GetNonce(from)+1)
-				fmt.Println("===publicstate begin evm tx")
 			}
 
 			runEvmState.Prepare(common.BytesToHash(txhash), blockHash, txIndex)
@@ -347,8 +344,6 @@ func (app *EVMApp) genExecFun(block *gtypes.Block, res *gtypes.ExecuteResult) Be
 				log.Warn("[evm execute],apply transaction", zap.Error(err))
 				publicState.RevertToSnapshot(publicSnapshot)
 				privateState.RevertToSnapshot(privateSnapshot)
-				temPrivateReceipt = nil
-				temPublicReceipt = nil
 				res.InvalidTxs = append(res.InvalidTxs, gtypes.ExecuteInvalidTx{Bytes: raw, Error: err})
 				return true
 			}
@@ -480,15 +475,23 @@ func (app *EVMApp) CheckTx(bs []byte) ([]byte, error) {
 	app.stateMtx.Lock()
 	defer app.stateMtx.Unlock()
 	// Last but not least check for nonce errors
-	getNonce := app.publicState.GetNonce(from)
+	// Transactor should have enough funds to cover the costs
+	// cost == V + GP * GL
+	var getNonce uint64
+	if tx.Protected() {
+		getNonce = app.privateState.GetNonce(from)
+		if app.privateState.GetBalance(from).Cmp(tx.Cost()) < 0 {
+			return nil, fmt.Errorf("not enough funds")
+		}
+	} else {
+		getNonce = app.publicState.GetNonce(from)
+		if app.publicState.GetBalance(from).Cmp(tx.Cost()) < 0 {
+			return nil, fmt.Errorf("not enough funds")
+		}
+	}
 	if getNonce > tx.Nonce() {
 		txhash := gtypes.Tx(bs).Hash()
 		return nil, fmt.Errorf("nonce(%d) different with getNonce(%d), transaction already exists %v", tx.Nonce(), getNonce, hex.EncodeToString(txhash))
-	}
-	// Transactor should have enough funds to cover the costs
-	// cost == V + GP * GL
-	if app.publicState.GetBalance(from).Cmp(tx.Cost()) < 0 {
-		return nil, fmt.Errorf("not enough funds")
 	}
 	return rlp.EncodeToBytes(tx)
 }
@@ -617,6 +620,7 @@ func (app *EVMApp) queryContract(load []byte, height uint64) gtypes.Result {
 	if err != nil {
 		return gtypes.NewError(gtypes.CodeType_BaseInvalidInput, err.Error())
 	}
+
 	txMsg := etypes.NewMessage(from, tx.To(), 0, tx.Value(), tx.Gas(), tx.GasPrice(), tx.Data(), false)
 
 	bc := NewBlockChain(app.stateDb)
@@ -629,13 +633,11 @@ func (app *EVMApp) queryContract(load []byte, height uint64) gtypes.Result {
 
 		envCxt := core.NewEVMContext(txMsg, app.currentHeader, bc, nil)
 
-		fmt.Println("====isPrivateTx", tx.Protected())
-
 		app.stateMtx.Lock()
 		if tx.Protected() {
-			vmEnv = vm.NewEVM(envCxt, app.currentPrivateState.Copy(), app.chainConfig, evmConfig)
+			vmEnv = vm.NewEVM(envCxt, app.privateState.Copy(), app.chainConfig, evmConfig)
 		} else {
-			vmEnv = vm.NewEVM(envCxt, app.currentPublicState.Copy(), app.chainConfig, evmConfig)
+			vmEnv = vm.NewEVM(envCxt, app.publicState.Copy(), app.chainConfig, evmConfig)
 		}
 
 		app.stateMtx.Unlock()
@@ -666,7 +668,6 @@ func (app *EVMApp) queryContract(load []byte, height uint64) gtypes.Result {
 	if err != nil {
 		log.Warn("query apply msg err", zap.Error(err))
 	}
-	fmt.Println("====res", res)
 	return gtypes.NewResultOK(res, "")
 }
 
@@ -680,15 +681,23 @@ func makeETHHeader(header *gtypes.Header) *etypes.Header {
 	}
 }
 
-func (app *EVMApp) queryNonce(addrBytes []byte) gtypes.Result {
+func (app *EVMApp) queryNonce(load []byte) gtypes.Result {
+	flag := load[0]
+	addrBytes := load[1:]
 	if len(addrBytes) != 20 {
 		return gtypes.NewError(gtypes.CodeType_BaseInvalidInput, "Invalid address")
 	}
 	addr := common.BytesToAddress(addrBytes)
-
-	app.stateMtx.Lock()
-	nonce := app.publicState.GetNonce(addr)
-	app.stateMtx.Unlock()
+	var nonce uint64
+	if flag == 1 {
+		app.stateMtx.Lock()
+		nonce = app.privateState.GetNonce(addr)
+		app.stateMtx.Unlock()
+	} else {
+		app.stateMtx.Lock()
+		nonce = app.publicState.GetNonce(addr)
+		app.stateMtx.Unlock()
+	}
 
 	data, err := rlp.EncodeToBytes(nonce)
 	if err != nil {

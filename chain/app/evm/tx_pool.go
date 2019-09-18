@@ -234,7 +234,8 @@ func (tp *ethTxPool) refreshAdminOP(txsMap map[string]struct{}) {
 // get account nonce from app.state
 func (tp *ethTxPool) safeGetNonce(addr common.Address) uint64 {
 	tp.app.stateMtx.Lock()
-	nonce := tp.app.publicState.GetNonce(addr)
+	var nonce uint64
+	nonce = tp.app.privateState.GetNonce(addr)
 	tp.app.stateMtx.Unlock()
 	return nonce
 }
@@ -412,6 +413,7 @@ func (tp *ethTxPool) addWaiting(tx *etypes.Transaction, address common.Address) 
 // are moved back into the waiting queue.
 func (tp *ethTxPool) demoteUnexecutables() {
 	for addr, accountTxs := range tp.pending {
+
 		nonce := tp.safeGetNonce(addr)
 
 		// Drop all transactions that are deemed too old (low nonce)
