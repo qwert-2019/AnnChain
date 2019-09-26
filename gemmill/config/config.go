@@ -258,6 +258,7 @@ func DefaultConfig() (conf *viper.Viper) {
 	conf.Set("threshold_blocks", 0)
 	conf.SetDefault("block_size", 5000)
 	conf.Set("private_server_host", "")
+	conf.Set("private_send_withsign", true)
 
 	return conf
 }

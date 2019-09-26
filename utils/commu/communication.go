@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/dappledger/AnnChain/eth/rlp"
+	"github.com/dappledger/AnnChain/gemmill/go-crypto"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -21,6 +22,55 @@ func Hash(v interface{}) []byte {
 	return h
 }
 
+func SendPayloadWithSign(host string, pubkeys []string, data []byte, signer crypto.PrivKey) ([]byte, error) {
+	if len(host) > 0 {
+		DefaultHost = host
+	}
+	url := DefaultHost + "/v1/transaction/withsignature"
+	payloadHash := Hash(data)
+	params := struct {
+		PubKeys []string `json:"public_keys"`
+		Value   []byte   `json:"value"`
+		Sign    []byte   `json:"sign"`
+	}{}
+	params.PubKeys = pubkeys
+	params.Value = data
+	params.Sign = signer.Sign(payloadHash).Bytes()
+	bytParams, err := json.Marshal(params)
+	if err != nil {
+		return payloadHash, err
+	}
+	buff := bytes.NewBuffer(bytParams)
+	req, err := http.NewRequest("PUT", url, buff)
+	if err != nil {
+		return payloadHash, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Connection", "close")
+
+	client := &http.Client{}
+	rsp, err := client.Do(req)
+	if err != nil {
+		return payloadHash, err
+	}
+	byt, err := ioutil.ReadAll(rsp.Body)
+	if err != nil {
+		return payloadHash, err
+	}
+	result := &struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}{}
+
+	if err = json.Unmarshal(byt, result); err != nil {
+		return payloadHash, err
+	}
+	if !result.Success {
+		return payloadHash, errors.New(result.Message)
+	}
+	return payloadHash, nil
+}
+
 func SendPayload(host string, pubkeys []string, data []byte) ([]byte, error) {
 	if len(host) > 0 {
 		DefaultHost = host
@@ -28,7 +78,7 @@ func SendPayload(host string, pubkeys []string, data []byte) ([]byte, error) {
 	url := DefaultHost + "/v1/transaction"
 	payloadHash := Hash(data)
 	params := struct {
-		PubKeys []string `json:"pubkeys"`
+		PubKeys []string `json:"public_keys"`
 		Value   []byte   `json:"value"`
 	}{}
 	params.PubKeys = pubkeys

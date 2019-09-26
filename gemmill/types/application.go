@@ -44,6 +44,7 @@ type Application interface {
 type Core interface {
 	Query(byte, []byte) (interface{}, error)
 	GetBlockMeta(height int64) (*BlockMeta, error)
+	PrivValidator() *PrivValidator
 }
 
 // type AppMaker func(config.Config) Application

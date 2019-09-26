@@ -100,6 +100,7 @@ type EVMApp struct {
 	Config  *viper.Viper
 
 	secChanHost string
+	isWithSign  bool
 
 	currentHeader *etypes.Header
 	chainConfig   *params.ChainConfig
@@ -130,6 +131,7 @@ func NewEVMApp(config *viper.Viper) (*EVMApp, error) {
 	app := &EVMApp{
 		datadir:       config.GetString("db_dir"),
 		secChanHost:   config.GetString("private_server_host"),
+		isWithSign:    config.GetBool("private_send_withsign"),
 		Config:        config,
 		chainConfig:   params.MainnetChainConfig,
 		publicSigner:  new(etypes.HomesteadSigner),
@@ -463,11 +465,19 @@ func (app *EVMApp) CheckTx(bs []byte) ([]byte, error) {
 			return nil, err
 		}
 		if app.isPrivateNode() {
-			payloadHash, err := commu.SendPayload("", repPayload.PrivateMembers, repPayload.Payload)
-			if err != nil {
-				return nil, err
+			if app.isWithSign {
+				payloadHash, err := commu.SendPayloadWithSign("", repPayload.PrivateMembers, repPayload.Payload, app.core.PrivValidator().GetPrivKey())
+				if err != nil {
+					return nil, err
+				}
+				tx.SetData(payloadHash)
+			} else {
+				payloadHash, err := commu.SendPayload("", repPayload.PrivateMembers, repPayload.Payload)
+				if err != nil {
+					return nil, err
+				}
+				tx.SetData(payloadHash)
 			}
-			tx.SetData(payloadHash)
 		} else {
 			return nil, errors.New("node private tx unsupported")
 		}
