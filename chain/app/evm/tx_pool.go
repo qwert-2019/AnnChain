@@ -163,10 +163,12 @@ func (tp *ethTxPool) ReceiveTx(rawTx types.Tx) error {
 	if types.IsAdminOP(rawTx) {
 		return tp.handleAdminOP(rawTx)
 	}
-
 	tx := &etypes.Transaction{}
 	if err := rlp.DecodeBytes(rawTx, tx); err != nil {
 		return err
+	}
+	if tx.Protected() {
+		return tp.handleAdminOP(rawTx)
 	}
 	if err := tp.CheckAndAdd(tx, rawTx); err != nil {
 		return err
@@ -235,7 +237,7 @@ func (tp *ethTxPool) refreshAdminOP(txsMap map[string]struct{}) {
 func (tp *ethTxPool) safeGetNonce(addr common.Address) uint64 {
 	tp.app.stateMtx.Lock()
 	var nonce uint64
-	nonce = tp.app.privateState.GetNonce(addr)
+	nonce = tp.app.publicState.GetNonce(addr)
 	tp.app.stateMtx.Unlock()
 	return nonce
 }
