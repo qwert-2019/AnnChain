@@ -1,6 +1,6 @@
 # AnnChain Command Tool
 
-This document is about AnnChain's usage. It does not involve AnnChain installation, node deployment and start-up. 
+This document is about AnnChain's usage. It does not involve Annchain installation, node deployment and start-up. 
 This note uses gtool to deploy and execute smart contracts, also can use the Go/Java SDK to perform contract-related operations.
 
 ## Create Account
